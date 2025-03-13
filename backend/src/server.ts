@@ -1,49 +1,81 @@
-import express, { Request, Response } from 'express';
+import express, { Application, Request, Response, NextFunction } from 'express';
 import cors from 'cors';
 import dotenv from 'dotenv';
-import { supabase } from './utils/db';
+import { supabase, testSupabaseConnection } from './utils/db';
 import { PostgrestError } from '@supabase/supabase-js';
+import helmet from 'helmet';
 
 dotenv.config();
 
-const app = express();
-const port = process.env.PORT || 4000;
+const app: Application = express();
+const port: number | string = process.env.PORT || 4000;
 
 app.use(cors());
+app.use(helmet());
 app.use(express.json());
 
-app.get('/health', (req: Request, res: Response) => {
-  res.status(200).json({ status: 'ok' });
+app.get('/health', (_req: Request, res: Response): void => {
+  res.status(200).json({ 
+    status: 'ok', 
+    timestamp: new Date().toISOString(),
+    environment: process.env.NODE_ENV || 'development'
+  });
 });
 
-app.get('/db-test', async (req: Request, res: Response) => {
+app.get('/db-test', async (_req: Request, res: Response, next: NextFunction): Promise<void> => {
   try {
     const { data, error } = await supabase.from('users').select('*').limit(1);
     
     if (error) {
       const postgrestError = error as PostgrestError;
-      throw postgrestError;
+      res.status(500).json({ 
+        message: 'Database connection failed', 
+        error: postgrestError 
+      });
+      return;
     }
     
     res.status(200).json({ 
       message: 'Database connection successful', 
-      data 
+      recordCount: data?.length || 0
     });
   } catch (error) {
-    const errorMessage = error instanceof Error 
-      ? error.message 
-      : typeof error === 'string' 
-        ? error 
-        : 'An unknown error occurred';
-
-    console.error('Database connection error:', error);
-    res.status(500).json({ 
-      message: 'Failed to connect to database', 
-      error: errorMessage 
-    });
+    next(error);
   }
 });
 
-app.listen(port, () => {
-  console.log(`Server running on port ${port}`);
+app.use((
+  err: Error, 
+  _req: Request, 
+  res: Response, 
+  _next: NextFunction
+): void => {
+  console.error('Unhandled error:', err);
+  res.status(500).json({ 
+    message: 'Internal server error', 
+    error: process.env.NODE_ENV === 'development' ? err.message : 'An unexpected error occurred'
+  });
 });
+
+const startServer = async (): Promise<void> => {
+  try {
+    const isConnected = await testSupabaseConnection();
+    
+    if (!isConnected) {
+      console.error('Failed to establish Supabase connection. Server not started.');
+      process.exit(1);
+    }
+
+    app.listen(port, (): void => {
+      console.log(`Server running on port ${port}`);
+      console.log(`Environment: ${process.env.NODE_ENV || 'development'}`);
+    });
+  } catch (error) {
+    console.error('Error starting server:', error);
+    process.exit(1);
+  }
+};
+
+startServer();
+
+export default app;
